@@ -1,9 +1,10 @@
 // Board Export – Trello Power-Up
-// Export modal UI controller (Phase 2 & 3: Auth, Data fetching, and UI Rendering)
+// Export modal UI controller (Phase 4: Filters + Live Preview)
 
 import { APP_KEY, APP_NAME, APP_AUTHOR } from './config.js';
-import { fetchBoardData, getStore } from './api.js';
+import { fetchBoardData, getStore, loadCommentsIfNecessary } from './api.js';
 import { COLUMNS } from './columns.js';
+import { filterCards, getActiveListIds } from './filters.js';
 
 /* global TrelloPowerUp */
 
@@ -29,10 +30,14 @@ const containers = {
   lists: document.getElementById('lists-container'),
   labels: document.getElementById('labels-container'),
   members: document.getElementById('members-container'),
-  columns: document.getElementById('columns-container')
+  columns: document.getElementById('columns-container'),
 };
 
 const toggleArchived = document.getElementById('include-archived');
+const dueSelect = document.getElementById('due-select');
+const previewTitle = document.getElementById('preview-title');
+const previewContainer = document.getElementById('preview-container');
+const btnDownload = document.getElementById('btn-download');
 
 // Trello Colors to HEX map
 const colorMap = {
@@ -45,45 +50,153 @@ const colorMap = {
   sky: '#6CC3E0', sky_light: '#C6EDFB', sky_dark: '#206A83',
   lime: '#94C748', lime_light: '#D3F1A7', lime_dark: '#4C6B1F',
   pink: '#E774BB', pink_light: '#FDD0EC', pink_dark: '#943D73',
-  black: '#8590A2', black_light: '#DFE1E6', black_dark: '#091E42'
+  black: '#8590A2', black_light: '#DFE1E6', black_dark: '#091E42',
 };
 const defaultColor = '#DFE1E6';
 
 // State
 let globalStore = null;
+let debounceTimer = null;
 
-// Helpers
+// ─── Helpers ───
+
 function showScreen(screenName) {
-  Object.values(screens).forEach(s => {
-    s.style.display = 'none';
-  });
+  Object.values(screens).forEach(s => (s.style.display = 'none'));
   if (screens[screenName]) {
     screens[screenName].style.display = 'block';
   }
   t.sizeTo('#app').catch(() => {});
 }
 
-// Phase 3 UI Rendering
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ─── Read Current Filter State from DOM ───
+
+function readFilters() {
+  const selectedListIds = new Set();
+  containers.lists.querySelectorAll('input:checked').forEach(cb => selectedListIds.add(cb.value));
+
+  const selectedLabelIds = new Set();
+  containers.labels.querySelectorAll('input:checked').forEach(cb => selectedLabelIds.add(cb.value));
+
+  const selectedMemberIds = new Set();
+  containers.members.querySelectorAll('input:checked').forEach(cb => selectedMemberIds.add(cb.value));
+
+  return {
+    selectedListIds,
+    selectedLabelIds,
+    selectedMemberIds,
+    dueFilter: dueSelect.value,
+    includeArchived: toggleArchived.checked,
+  };
+}
+
+function readSelectedColumns() {
+  const selected = [];
+  containers.columns.querySelectorAll('input:checked').forEach(cb => {
+    const col = COLUMNS.find(c => c.key === cb.value);
+    if (col) selected.push(col);
+  });
+  return selected;
+}
+
+// ─── Preview Rendering ───
+
+function renderPreview() {
+  const store = getStore();
+  if (!store) return;
+
+  const filters = readFilters();
+  const selectedCols = readSelectedColumns();
+  const filteredCards = filterCards(store.cards, store.listsById, filters);
+  const activeListIds = getActiveListIds(filteredCards);
+
+  // Update title
+  previewTitle.textContent = `Preview · ${filteredCards.length} cards in ${activeListIds.size} lists`;
+
+  // Validation states
+  if (selectedCols.length === 0) {
+    previewContainer.innerHTML = '<p class="preview-empty">Select at least one column.</p>';
+    btnDownload.disabled = true;
+    return;
+  }
+
+  if (filteredCards.length === 0) {
+    previewContainer.innerHTML = '<p class="preview-empty">No cards match the current filters.</p>';
+    btnDownload.disabled = true;
+    return;
+  }
+
+  btnDownload.disabled = false;
+
+  // Build table
+  const maxPreview = 6;
+  const previewCards = filteredCards.slice(0, maxPreview);
+  const remaining = filteredCards.length - previewCards.length;
+
+  let html = '<table class="preview-table"><thead><tr>';
+  selectedCols.forEach(col => {
+    html += `<th>${escapeHtml(col.header)}</th>`;
+  });
+  html += '</tr></thead><tbody>';
+
+  previewCards.forEach(card => {
+    html += '<tr>';
+    selectedCols.forEach(col => {
+      let value = col.getter(card, store);
+      // Truncate long text for preview
+      if (value && value.length > 120) {
+        value = value.substring(0, 120) + '…';
+      }
+      // Handle link column specially
+      if (col.key === 'link' && value) {
+        html += `<td><a href="${escapeHtml(value)}" target="_blank" rel="noopener">${escapeHtml(value)}</a></td>`;
+      } else {
+        html += `<td>${escapeHtml(value)}</td>`;
+      }
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+
+  if (remaining > 0) {
+    html += `<p class="preview-more">…and ${remaining} more cards.</p>`;
+  }
+
+  previewContainer.innerHTML = html;
+  t.sizeTo('#app').catch(() => {});
+}
+
+// Debounced preview update (150ms)
+function schedulePreviewUpdate() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(renderPreview, 150);
+}
+
+// ─── UI Rendering (Phase 3) ───
+
 function renderUI() {
   const store = getStore();
-  
+
   // Render Lists
   containers.lists.innerHTML = '';
   const sortedLists = Array.from(store.listsById.values()).sort((a, b) => a.pos - b.pos);
   sortedLists.forEach(list => {
     const label = document.createElement('label');
     label.className = 'checkbox-item list-checkbox';
-    // Hide archived lists by default
     if (list.closed && !toggleArchived.checked) {
       label.style.display = 'none';
     }
-    // Default to selected if it is open
     const checkedStr = !list.closed ? 'checked' : '';
     const archivedTag = list.closed ? '<span class="archived-tag">(archived)</span>' : '';
-    
     label.innerHTML = `
       <input type="checkbox" value="${list.id}" class="filter-list" ${checkedStr}>
-      <span class="label-text" title="${list.name}">${list.name}</span>
+      <span class="label-text" title="${escapeHtml(list.name)}">${escapeHtml(list.name)}</span>
       ${archivedTag}
     `;
     containers.lists.appendChild(label);
@@ -91,35 +204,32 @@ function renderUI() {
 
   // Render Labels
   containers.labels.innerHTML = '';
-  const sortedLabels = Array.from(store.labelsById.values()); // Order as returned by API
-  sortedLabels.forEach(labelItem => {
+  Array.from(store.labelsById.values()).forEach(labelItem => {
     const label = document.createElement('label');
     label.className = 'checkbox-item';
-    
     const hex = colorMap[labelItem.color] || defaultColor;
     const nameStr = labelItem.name || (labelItem.color ? labelItem.color.replace(/_/g, ' ') : 'No name');
-    
     label.innerHTML = `
       <input type="checkbox" value="${labelItem.id}" class="filter-label">
       <span class="label-dot" style="background-color: ${hex};"></span>
-      <span class="label-text" title="${nameStr}">${nameStr}</span>
+      <span class="label-text" title="${escapeHtml(nameStr)}">${escapeHtml(nameStr)}</span>
     `;
     containers.labels.appendChild(label);
   });
 
   // Render Members
   containers.members.innerHTML = '';
-  const sortedMembers = Array.from(store.membersById.values()).sort((a, b) => a.fullName.localeCompare(b.fullName));
-  sortedMembers.forEach(member => {
-    const label = document.createElement('label');
-    label.className = 'checkbox-item';
-    
-    label.innerHTML = `
-      <input type="checkbox" value="${member.id}" class="filter-member">
-      <span class="label-text" title="${member.fullName} (@${member.username})">${member.fullName}</span>
-    `;
-    containers.members.appendChild(label);
-  });
+  Array.from(store.membersById.values())
+    .sort((a, b) => a.fullName.localeCompare(b.fullName))
+    .forEach(member => {
+      const label = document.createElement('label');
+      label.className = 'checkbox-item';
+      label.innerHTML = `
+        <input type="checkbox" value="${member.id}" class="filter-member">
+        <span class="label-text" title="${escapeHtml(member.fullName)} (@${escapeHtml(member.username)})">${escapeHtml(member.fullName)}</span>
+      `;
+      containers.members.appendChild(label);
+    });
 
   // Render Columns
   containers.columns.innerHTML = '';
@@ -127,7 +237,6 @@ function renderUI() {
     const label = document.createElement('label');
     label.className = 'checkbox-item';
     const checkedStr = col.default ? 'checked' : '';
-    
     label.innerHTML = `
       <input type="checkbox" value="${col.key}" class="filter-column" ${checkedStr}>
       <span class="label-text" title="${col.header}">${col.header}</span>
@@ -136,55 +245,69 @@ function renderUI() {
   });
 
   setupUIEvents();
+  renderPreview();
 }
 
+// ─── UI Events ───
+
 function setupUIEvents() {
-  // Archived Toggle
-  toggleArchived.addEventListener('change', (e) => {
-    const showArchived = e.target.checked;
-    const listItems = containers.lists.querySelectorAll('.list-checkbox');
+  // Archived toggle
+  toggleArchived.addEventListener('change', () => {
+    const showArchived = toggleArchived.checked;
     const store = getStore();
-    
-    listItems.forEach(item => {
+    containers.lists.querySelectorAll('.list-checkbox').forEach(item => {
       const checkbox = item.querySelector('input');
       const listData = store.listsById.get(checkbox.value);
       if (listData && listData.closed) {
         item.style.display = showArchived ? 'flex' : 'none';
-        if (!showArchived) checkbox.checked = false; // uncheck if hidden
+        if (!showArchived) checkbox.checked = false;
       }
     });
-    // Triggers Phase 4 Preview update later
+    schedulePreviewUpdate();
   });
 
-  // Helper for bulk checking
-  const setCheckboxes = (containerId, selector, state) => {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    const checkboxes = container.querySelectorAll(selector);
-    checkboxes.forEach(cb => {
-      // Only check visible ones
+  // Due date change
+  dueSelect.addEventListener('change', schedulePreviewUpdate);
+
+  // Bulk helpers
+  const setCheckboxes = (container, selector, state) => {
+    container.querySelectorAll(selector).forEach(cb => {
       if (state && cb.closest('.checkbox-item').style.display !== 'none') {
-         cb.checked = true;
+        cb.checked = true;
       } else if (!state) {
-         cb.checked = false;
+        cb.checked = false;
       }
     });
+    schedulePreviewUpdate();
   };
 
-  document.getElementById('lists-all').addEventListener('click', (e) => { e.preventDefault(); setCheckboxes('lists-container', 'input[type="checkbox"]', true); });
-  document.getElementById('lists-none').addEventListener('click', (e) => { e.preventDefault(); setCheckboxes('lists-container', 'input[type="checkbox"]', false); });
-  
-  document.getElementById('cols-default').addEventListener('click', (e) => { 
-    e.preventDefault(); 
-    const checkboxes = containers.columns.querySelectorAll('input[type="checkbox"]');
-    checkboxes.forEach(cb => {
+  document.getElementById('lists-all').addEventListener('click', e => { e.preventDefault(); setCheckboxes(containers.lists, 'input[type="checkbox"]', true); });
+  document.getElementById('lists-none').addEventListener('click', e => { e.preventDefault(); setCheckboxes(containers.lists, 'input[type="checkbox"]', false); });
+
+  document.getElementById('cols-default').addEventListener('click', e => {
+    e.preventDefault();
+    containers.columns.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       const colDef = COLUMNS.find(c => c.key === cb.value);
       cb.checked = colDef ? colDef.default : false;
     });
+    schedulePreviewUpdate();
   });
-  
-  document.getElementById('cols-all').addEventListener('click', (e) => { e.preventDefault(); setCheckboxes('columns-container', 'input[type="checkbox"]', true); });
+  document.getElementById('cols-all').addEventListener('click', e => { e.preventDefault(); setCheckboxes(containers.columns, 'input[type="checkbox"]', true); });
+
+  // Listen to ALL checkbox changes and select changes inside #main-screen for live preview
+  document.getElementById('main-screen').addEventListener('change', (e) => {
+    if (e.target.type === 'checkbox' || e.target.tagName === 'SELECT') {
+      // If 'comments' column is being checked, lazy-load comments
+      if (e.target.classList.contains('filter-column') && e.target.value === 'comments' && e.target.checked) {
+        loadCommentsIfNecessary(t).then(() => schedulePreviewUpdate());
+        return;
+      }
+      schedulePreviewUpdate();
+    }
+  });
 }
+
+// ─── Data Loading ───
 
 async function loadData() {
   showScreen('loading');
@@ -206,7 +329,6 @@ async function loadData() {
 async function checkAuthAndLoad() {
   const restApi = t.getRestApi();
   const isAuth = await restApi.isAuthorized();
-  
   if (isAuth) {
     await loadData();
   } else {
@@ -214,7 +336,8 @@ async function checkAuthAndLoad() {
   }
 }
 
-// Event Listeners
+// ─── Event Listeners ───
+
 btnAuthorize.addEventListener('click', async () => {
   const restApi = t.getRestApi();
   try {
@@ -225,16 +348,17 @@ btnAuthorize.addEventListener('click', async () => {
   }
 });
 
-btnRetry.addEventListener('click', () => {
-  checkAuthAndLoad();
-});
+btnRetry.addEventListener('click', () => checkAuthAndLoad());
 
-// Initialization
+// ─── Initialization ───
+
 t.render(function () {
   if (!globalStore && screens.loading.style.display === 'none' && screens.auth.style.display === 'none' && screens.error.style.display === 'none') {
     checkAuthAndLoad();
   } else {
-      t.sizeTo('#app').catch(() => {});
+    t.sizeTo('#app').catch(() => {});
   }
 });
 
+// Export for Phase 5 (excel.js will need these)
+export { readFilters, readSelectedColumns, t };
