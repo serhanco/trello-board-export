@@ -5,6 +5,7 @@ import { APP_KEY, APP_NAME, APP_AUTHOR } from './config.js';
 import { fetchBoardData, getStore, loadCommentsIfNecessary } from './api.js';
 import { COLUMNS } from './columns.js';
 import { filterCards, getActiveListIds } from './filters.js';
+import { generateExcel } from './excel.js';
 
 /* global TrelloPowerUp */
 
@@ -349,6 +350,32 @@ btnAuthorize.addEventListener('click', async () => {
 });
 
 btnRetry.addEventListener('click', () => checkAuthAndLoad());
+
+btnDownload.addEventListener('click', async () => {
+  const originalText = btnDownload.textContent;
+  btnDownload.disabled = true;
+  btnDownload.textContent = 'Generating…';
+  
+  try {
+    const store = getStore();
+    const filters = readFilters();
+    const selectedCols = readSelectedColumns();
+    const options = {
+      sheetPerList: document.getElementById('sheet-per-list').checked,
+      sheetChecklistItems: document.getElementById('sheet-checklist-items').checked
+    };
+    
+    await generateExcel(store, filters, selectedCols, options);
+  } catch (err) {
+    console.error('[Board Export] Error generating Excel:', err);
+    alert('An error occurred while generating the Excel file. Please try again.');
+  } finally {
+    // Re-evaluate if it should be enabled based on preview state
+    const filteredCards = filterCards(getStore().cards, getStore().listsById, readFilters());
+    btnDownload.disabled = (filteredCards.length === 0 || readSelectedColumns().length === 0);
+    btnDownload.textContent = originalText;
+  }
+});
 
 // ─── Initialization ───
 
