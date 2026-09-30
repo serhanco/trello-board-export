@@ -2,7 +2,7 @@
 // Configuration constants
 
 // Replace with your Trello API key from https://trello.com/power-ups/admin
-const APP_KEY = 'YOUR_API_KEY_HERE';
+const APP_KEY = '1APWwAHBza5BG4Z2pDkGLoBlho6pEtvS';
 
 const APP_NAME = 'Board Export';
 const APP_AUTHOR = 'Board Export Power-Up';
